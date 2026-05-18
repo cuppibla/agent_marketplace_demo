@@ -1,0 +1,17 @@
+{
+  "name": "Buddy",
+  "breed": "Labrador Retriever",
+  "age_years": 3,
+  "energy": "high",
+  "weight_lbs": 65,
+  "preferences": {
+    "loves": ["dog parks", "open fields", "swimming"],
+    "dislikes": ["heavy rain", "crowded sidewalks"]
+  },
+  "constraints": {
+    "max_temp_f": 85,
+    "max_walk_minutes_when_hot": 30,
+    "needs_water_at": "70F"
+  },
+  "last_walked": "2026-05-16T08:30:00-07:00"
+}
