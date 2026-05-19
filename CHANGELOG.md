@@ -2,6 +2,21 @@
 
 Iterative changes during demo development. Latest first.
 
+## 2026-05-19
+
+### Rewrote PRESENTATION.md as a YouTube-style script
+- **Why:** Annie went through dozens of clarifying questions during prep (what's a Hub, batching, fan-out, pub/sub, Cloud Run URL question, yellow pages vs phone book, A2A skill vs ADK skill, all-Google-MCP-in-Registry, MCP tools vs A2A skills, Session Registry confusion, etc.). The previous script was a bullet-point outline; for beginners following along, every one of those questions would derail the talk. Rewrote as narrative prose with every clarification baked inline at the moment a beginner would need it.
+- **What changed:**
+  - Tone: from "Say: '…'" bullets → full conversational dialogue you can read aloud
+  - Format: each slide has 🎬 SCREEN notes, 🔍 POINT AT cues, 💬 ANTICIPATED QUESTION callouts answered inline, and the actual speaker prose
+  - Section 0 expanded from 5 → 7 min to slot in the two race-condition architecture diagrams (Hybrid Transport Model + A2A Network Topology), each with full speaker scripts that clarify Hub/batching/fan-out/pub/sub and head off the Session-Registry-vs-Agent-Registry confusion
+  - Added inline clarifications for: A2A skill vs ADK/Claude skill (different things, same word); Cloud Run URLs (sharp question — pain is mapping not stability); MCP tools vs A2A skills (different scope, same purpose); Google's 22 first-party MCP servers already in the Registry
+  - Q&A section expanded with 4 new entries from Annie's prep questions
+  - Cheat sheet at the bottom updated to match the new flow with inline-clarification reminders
+  - Total runtime: ~30 → ~33 min (extra time goes to the clarifications)
+- **Pre-show checklist** now lists three image assets to add to `assets/`: race-condition banner + the two diagrams
+- **Files:** [PRESENTATION.md](./PRESENTATION.md) (full rewrite).
+
 ## 2026-05-16
 
 ### Restructured PRESENTATION.md with race-condition as the "before" example
