@@ -1,10 +1,14 @@
 """OrchestratorAgent — A2A client that discovers and delegates to specialists.
 
-Uses the Google Cloud Agent Registry MCP server to search for A2A agents
-by skill, then dispatches the user's request via the A2A protocol.
+Refactored as a SequentialAgent workflow with three sub-agents:
+  1. topic_extractor  — picks the single primary topic from the user message
+  2. registry_finder  — searches the Agent Registry for a matching A2A agent
+  3. a2a_dispatcher   — sends the original user message to that agent and
+                        returns the response verbatim
 
-The Registry tools (search_agents, get_agent, list_agents) are the same
-ones the Registry MCP exposes — we don't hardcode any agent URLs.
+State flow (via output_key, surfaced into later instructions as {state_key}):
+  primary_topic        → consumed by registry_finder
+  agent_resource_name  → consumed by a2a_dispatcher
 """
 
 import asyncio
@@ -17,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+from google.adk.agents import SequentialAgent
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.tools.mcp_tool import McpToolset
@@ -37,66 +42,112 @@ registry_mcp_toolset = McpToolset(
 )
 
 
-INSTRUCTION = f"""You are the Orchestrator — a strict pass-through router. You connect user requests to one specialist A2A agent discovered in the Google Cloud Agent Registry.
+# Gemini 3 Flash preview — better instruction following than 2.5 Flash for
+# strict pass-through routing, faster than 2.5 Pro. Requires global endpoint.
+def _model() -> Gemini:
+    return Gemini(model="gemini-3-flash-preview")
 
-Registry parent: {parent_path()}
 
-Tools:
-- `registry_search_agents` — keyword search across agent skills.
-- `registry_list_agents` — list all agents.
-- `registry_get_agent` — fetch metadata for one agent.
-- `call_remote_a2a_agent` — send a message to a remote A2A agent.
+# ---------------------------------------------------------------------------
+# Step 1 — extract the single primary topic
+# ---------------------------------------------------------------------------
+TOPIC_INSTRUCTION = """You extract the SINGLE primary topic from the user's message.
 
-PROCESS — exactly these 4 steps, in order, no others:
+Rules:
+- Output ONLY the topic phrase on one line — no preamble, no punctuation, no quotes.
+- If the user mentions multiple topics, pick ONE: usually the first concrete request,
+  or the bigger task. Side requests and afterthoughts are NOT the primary topic.
+- Valid examples: "dog walk", "trip planning", "weather report", "code review".
 
-Step 1: Identify the SINGLE primary topic of the user's message. If the user
-        mentions multiple topics, pick ONE based on what they appear to want
-        most — usually the first concrete request, or the bigger task.
-        Examples of "single primary topic": "dog walk", "trip planning",
-        "weather report", "code review".
-
-Step 2: Call `registry_search_agents` ONCE with that single topic and
-        parent="{parent_path()}". Pick the first matching agent.
-
-Step 3: Call `call_remote_a2a_agent` IMMEDIATELY with that agent's resource
-        name and the user's ORIGINAL MESSAGE COPIED CHARACTER-FOR-CHARACTER —
-        including every comma, name, side request, and afterthought.
-
-Step 4: Return the remote agent's `response` field as your final answer,
-        VERBATIM. Do not prepend, append, or comment.
-
-WORKED EXAMPLE:
-
+Worked example:
   User: "Going to Kyoto for 5 days, what about Buddy while I am away"
-
-  Step 1: Primary topic = "trip planning" (the bigger task; the Buddy part
-          is an afterthought the specialist will handle).
-  Step 2: registry_search_agents(searchString="trip planning")
-          → returns trip-planner-agent.
-  Step 3: call_remote_a2a_agent(
-            agent_resource_name="...services/trip-planner-agent",
-            message="Going to Kyoto for 5 days, what about Buddy while I am away"
-          )
-          ← TripPlanner internally searches the Registry for a pet agent,
-            calls DogWalker, and returns the combined response.
-  Step 4: Return that combined response verbatim.
-
-FORBIDDEN — never:
-- Search the registry more than once per user message.
-- Search for peer agents on the specialist's behalf — that is the specialist's job.
-- Decide that a request "cannot be routed" after only one search. If one agent
-  matches even partially, ALWAYS delegate to it.
-- Add commentary about what an agent did or didn't do.
-- Invent or hardcode URLs.
+  → trip planning   (the Kyoto trip is the bigger task; Buddy is an afterthought)
 """
 
-root_agent = LlmAgent(
-    # Gemini 3 Flash preview — better instruction following than 2.5 Flash for
-    # strict pass-through routing, faster than 2.5 Pro. Requires global endpoint.
-    model=Gemini(model="gemini-3-flash-preview"),
+topic_extractor = LlmAgent(
+    model=_model(),
+    name="topic_extractor",
+    instruction=TOPIC_INSTRUCTION,
+    output_key="primary_topic",
+)
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — find the matching A2A agent in the Registry
+# ---------------------------------------------------------------------------
+FINDER_INSTRUCTION = f"""You find the right A2A agent in the Google Cloud Agent Registry.
+
+Registry parent: {parent_path()}
+Primary topic (from previous step): {{primary_topic}}
+
+Tool:
+- `registry_search_agents` — keyword search across agent skills.
+
+PROCESS — exactly these steps:
+1. Call `registry_search_agents` ONCE with:
+     searchString="{{primary_topic}}"
+     parent="{parent_path()}"
+2. Pick the FIRST matching agent in the result.
+3. Output ONLY that agent's resource name (the `name` field from its metadata),
+   on one line, with no preamble, no commentary, no quotes.
+
+FORBIDDEN:
+- Searching more than once.
+- Deciding "no match" — if any agent matches even partially, ALWAYS pick the first one.
+- Adding any commentary.
+- Inventing URLs or names.
+"""
+
+registry_finder = LlmAgent(
+    model=_model(),
+    name="registry_finder",
+    instruction=FINDER_INSTRUCTION,
+    tools=[registry_mcp_toolset],
+    output_key="agent_resource_name",
+)
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — dispatch the user's ORIGINAL message via A2A
+# ---------------------------------------------------------------------------
+DISPATCHER_INSTRUCTION = """You dispatch the user's ORIGINAL message to a remote A2A agent.
+
+Chosen agent (from previous step): {agent_resource_name}
+
+Tool:
+- `call_remote_a2a_agent` — send a message to a remote A2A agent.
+
+PROCESS — exactly these steps:
+1. Call `call_remote_a2a_agent` ONCE with:
+     agent_resource_name = {agent_resource_name}
+     message             = the USER'S ORIGINAL MESSAGE from the start of this
+                           conversation, copied CHARACTER-FOR-CHARACTER —
+                           every comma, name, side request, and afterthought
+                           included. Do NOT use the topic; use the full original
+                           user message.
+2. Return the remote agent's `response` field as your final answer, VERBATIM.
+   Do NOT prepend, append, or comment.
+
+FORBIDDEN:
+- Sending only the topic instead of the original message.
+- Adding commentary about what the remote agent did or didn't do.
+- Inventing or hardcoding URLs.
+"""
+
+a2a_dispatcher = LlmAgent(
+    model=_model(),
+    name="a2a_dispatcher",
+    instruction=DISPATCHER_INSTRUCTION,
+    tools=[call_remote_a2a_agent],
+)
+
+
+# ---------------------------------------------------------------------------
+# Root workflow — runs the three steps in order
+# ---------------------------------------------------------------------------
+root_agent = SequentialAgent(
     name="orchestrator_agent",
-    instruction=INSTRUCTION,
-    tools=[registry_mcp_toolset, call_remote_a2a_agent],
+    sub_agents=[topic_extractor, registry_finder, a2a_dispatcher],
 )
 
 
@@ -121,6 +172,7 @@ if __name__ == "__main__":
             session_service=session_service,
         )
 
+        final_text = None
         async for event in runner.run_async(
             user_id="user",
             session_id="s1",
@@ -128,21 +180,29 @@ if __name__ == "__main__":
                 role="user", parts=[types.Part.from_text(text=query)]
             ),
         ):
+            author = getattr(event, "author", None) or "?"
             if event.is_final_response():
-                print("\n" + "=" * 60)
-                print("FINAL RESPONSE:")
-                print("=" * 60)
-                print(event.content.parts[0].text)
-                print("=" * 60)
+                if event.content and event.content.parts:
+                    final_text = event.content.parts[0].text
             elif event.content and event.content.parts:
                 for part in event.content.parts:
                     if part.function_call:
                         args = dict(part.function_call.args)
-                        # truncate long arg values for readability
                         args_preview = {k: (str(v)[:80] + "...") if len(str(v)) > 80 else v for k, v in args.items()}
-                        print(f"  → tool: {part.function_call.name}({args_preview})")
+                        print(f"  [{author}] → tool: {part.function_call.name}({args_preview})")
                     elif part.function_response:
                         resp = str(part.function_response.response)
-                        print(f"  ← result: {resp[:250]}{'...' if len(resp) > 250 else ''}")
+                        print(f"  [{author}] ← result: {resp[:250]}{'...' if len(resp) > 250 else ''}")
+                    elif getattr(part, "text", None):
+                        text = part.text.strip()
+                        if text:
+                            print(f"  [{author}] ✎ {text[:200]}{'...' if len(text) > 200 else ''}")
+
+        if final_text is not None:
+            print("\n" + "=" * 60)
+            print("FINAL RESPONSE:")
+            print("=" * 60)
+            print(final_text)
+            print("=" * 60)
 
     asyncio.run(main())
